@@ -3,6 +3,33 @@ import {CAP_BYTES, MAX_FILE_BYTES, RETENTION_MS, DEVICES, HttpError, assert, bou
 const json = (value, status = 200) => new Response(JSON.stringify(value), {status, headers: {'Content-Type': 'application/json', 'Cache-Control': 'no-store'}});
 const authenticated = (request, secret) => Boolean(secret) && request.headers.get('Authorization') === `Bearer ${secret}`;
 const jobKey = id => `job:${id}`;
+const previewKey = id => `preview:${id}`;
+const previewDevices = ['Emulator', 'iPhone', 'WhereYouGo'];
+
+async function requirePreviewPlayer(request, secret) {
+  assert(secret, 503, 'Preview publishing is currently unavailable.');
+  const header = request.headers.get('Authorization') || '';
+  const value = header.startsWith('Bearer ') ? header.slice(7) : '';
+  assert(value.length > 0 && value.length <= 128, 401, 'Enter the preview player code.');
+  const encoder = new TextEncoder();
+  const key = await crypto.subtle.importKey('raw', encoder.encode(secret), {name: 'HMAC', hash: 'SHA-256'}, false, ['sign', 'verify']);
+  const expected = await crypto.subtle.sign('HMAC', key, encoder.encode(secret));
+  assert(await crypto.subtle.verify('HMAC', key, expected, encoder.encode(value)), 401, 'The preview player code is incorrect.');
+}
+
+function previewDetails(details) {
+  assert(details && typeof details === 'object', 400, 'Enter cartridge listing details.');
+  assert(details.permission === true, 400, 'Confirm you have permission to share the playable cartridge.');
+  const fields = {title:160, description:4000, country:120, region:120, time:50, coordinates:120, starting:2000};
+  const listing = {};
+  for (const [name, max] of Object.entries(fields)) {
+    const value = details[name] ?? '';
+    assert(typeof value === 'string' && value.trim().length <= max, 400, `Check the listing’s ${name} field.`);
+    listing[name] = value.trim();
+  }
+  assert(listing.title && listing.coordinates, 400, 'Enter a title and starting coordinates, or enter Play Anywhere.');
+  return listing;
+}
 
 export default {
   async fetch(request, env) {
@@ -114,6 +141,7 @@ export class CompilerCoordinator {
       return json({reservedBytes: (await this.ctx.storage.get('reservedBytes')) || 0, capBytes: CAP_BYTES});
     }
     if (path.startsWith('/api/v1/compile') || path.startsWith('/api/v1/uploads') || path === '/api/v1/demo') await this.countRequest();
+    if (path.startsWith('/api/v1/preview/')) return this.preview(request, path);
     if (path === '/api/v1/uploads/validate' && method === 'POST') {
       const heartbeat = await this.ctx.storage.get('runnerHeartbeat');
       assert(this.env.SERVICE_ENABLED === 'true' && Date.now() - (heartbeat || 0) < 120_000, 503, 'The cartridge checker is currently unavailable. Your cartridge has not been checked. Please try again later.');
@@ -126,8 +154,9 @@ export class CompilerCoordinator {
       if (internal) assert(authenticated(request, this.env.WEBSITE_TOKEN), 401, 'Website authentication required.');
       assert(internal || !uploadMatch[3], 404, 'Not found.');
       const job = await this.job(uploadMatch[2]);
-      assert(job.purpose === 'upload', 404, 'This is not a cartridge upload.');
-      const valid = job.status === 'done' && job.results.length > 0 && job.results.every(r => r.ok);
+      assert(job.purpose === 'upload' || (!internal && job.purpose === 'preview'), 404, 'This is not a cartridge upload.');
+      const valid = job.purpose === 'preview' ? this.previewReady(job) :
+        job.status === 'done' && job.results.length > 0 && job.results.every(r => r.ok);
       if (uploadMatch[3] && method === 'POST') {
         assert(valid, 409, 'This cartridge must pass validation before it can be published.');
         return this.retainValidatedSource(job);
@@ -167,6 +196,64 @@ export class CompilerCoordinator {
     }
     throw new HttpError(404, 'Not found.');
   }
+  previewReady(job) {
+    return job.status === 'done' && job.results.some(r => r.ok && r.device === 'Emulator') &&
+      job.results.some(r => r.ok && job.downloads.includes(r.device));
+  }
+  async preview(request, path) {
+    const method = request.method;
+    if (path === '/api/v1/preview/cartridges' && method === 'GET') {
+      const entries = await this.ctx.storage.list({prefix: 'preview:'});
+      return json({items: [...entries.values()].map(entry => entry.listing)
+        .filter(listing => listing.expiresAt > Date.now())
+        .sort((a, b) => b.created.localeCompare(a.created))});
+    }
+    const download = path.match(/^\/api\/v1\/preview\/cartridges\/([a-f0-9-]{36})\/download\/(iPhone|WhereYouGo)$/);
+    if (download && method === 'GET') {
+      const entry = await this.ctx.storage.get(previewKey(download[1]));
+      const device = download[2];
+      assert(entry && entry.listing.expiresAt > Date.now() && entry.listing.downloads.some(item => item.device === device), 404, 'This preview download is unavailable or has expired.');
+      const object = await this.env.TEMPORARY.get(`${entry.uploadId}/${device}.gwc`);
+      assert(object, 410, 'This preview download has expired.');
+      return new Response(object.body, {headers: {'Content-Type':'application/octet-stream',
+        'Content-Disposition': `attachment; filename="cartridge-${device}.gwc"`, 'Cache-Control':'no-store'}});
+    }
+    const publish = path.match(/^\/api\/v1\/preview\/uploads\/([a-f0-9-]{36})\/publish$/);
+    if (method !== 'POST' || (!publish && path !== '/api/v1/preview/uploads')) throw new HttpError(404, 'Not found.');
+    await requirePreviewPlayer(request, this.env.PREVIEW_PLAYER_CODE);
+    if (!publish) {
+      const heartbeat = await this.ctx.storage.get('runnerHeartbeat');
+      assert(this.env.SERVICE_ENABLED === 'true' && Date.now() - (heartbeat || 0) < 120_000, 503, 'The cartridge checker is currently unavailable.');
+      const jobs = await this.ctx.storage.list({prefix: 'job:'});
+      const active = [...jobs.values()].filter(job => job.purpose === 'preview' && job.expiresAt > Date.now());
+      assert(active.length < 12, 429, 'The preview upload limit has been reached. Try again after older uploads expire.');
+      const {bytes, filename} = await this.input(request, true);
+      return this.createJob(bytes, previewDevices, previewDevices.slice(1), false, {purpose:'preview', filename});
+    }
+    const job = await this.job(publish[1]);
+    assert(job.purpose === 'preview' && this.previewReady(job), 409, 'This preview upload must pass its cartridge check before publishing.');
+    if (job.previewListingId) return json({id: job.previewListingId, status:'published'});
+    let payload;
+    try { payload = JSON.parse(new TextDecoder().decode(await boundedBytes(request, 16_000))); }
+    catch (error) { if (error instanceof HttpError) throw error; throw new HttpError(400, 'Enter valid listing details.'); }
+    const details = previewDetails(payload);
+    const entries = await this.ctx.storage.list({prefix:'preview:'});
+    assert([...entries.values()].filter(entry => entry.listing.expiresAt > Date.now()).length < 6, 429, 'The preview catalog already has six cartridges. Try again after a listing expires.');
+    const id = crypto.randomUUID();
+    const downloads = job.results.filter(r => r.ok && job.downloads.includes(r.device)).map(({device}) => ({
+      device, label: device === 'WhereYouGo' ? 'Android · WhereYouGo' : device,
+      url: `/api/v1/preview/cartridges/${id}/download/${device}`
+    }));
+    const created = new Date().toISOString();
+    const listing = {...details, id, downloads, created, updated:created, author:'Sample Player', ownerId:'sample-player',
+      type:'Cartridge', about:details.description, image:'cartridge-topographic-device-solid-v1.webp',
+      anywhere:/^play anywhere$/i.test(details.coordinates), openSource:false, preview:true, expiresAt:job.expiresAt};
+    await this.ctx.storage.transaction(async tx => {
+      await tx.put(previewKey(id), {uploadId:job.id, listing});
+      await tx.put(jobKey(job.id), {...job, previewListingId:id});
+    });
+    return json({id, status:'published'}, 201);
+  }
   async input(request, validationOnly = false) {
     const body = await boundedBytes(request, MAX_FILE_BYTES + 100_000);
     const form = await new Response(body, {headers: {'Content-Type': request.headers.get('Content-Type') || ''}}).formData();
@@ -190,7 +277,7 @@ export class CompilerCoordinator {
     job.status = demo ? 'running' : 'queued';
     if (demo) { job.startedAt = now; job.lease = crypto.randomUUID(); }
     await this.ctx.storage.put(jobKey(id), job);
-    return json({jobId: id, ...(job.purpose === 'upload' ? {uploadId: id} : {}), expiresAt: job.expiresAt, ...(demo ? {lease: job.lease} : {})}, 202);
+    return json({jobId: id, ...((job.purpose === 'upload' || job.purpose === 'preview') ? {uploadId: id} : {}), expiresAt: job.expiresAt, ...(demo ? {lease: job.lease} : {})}, 202);
   }
   async retainValidatedSource(job) {
     // Only the authenticated publication backend calls this after checking
@@ -287,6 +374,7 @@ export class CompilerCoordinator {
         if (!current) return;
         const used = (await tx.get('reservedBytes')) || 0;
         await tx.put('reservedBytes', Math.max(0, used - current.budget));
+        if (current.previewListingId) await tx.delete(previewKey(current.previewListingId));
         await tx.delete(jobKey(job.id));
       });
     }
