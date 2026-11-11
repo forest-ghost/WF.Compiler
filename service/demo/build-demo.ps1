@@ -1,9 +1,9 @@
-param([switch]$SkipBuild)
+param([switch]$SkipBuild, [string]$LinuxContainerImage)
 $ErrorActionPreference = 'Stop'
 $compilerRoot = (Resolve-Path (Join-Path $PSScriptRoot '../..')).Path
 Push-Location $compilerRoot
 try {
-    if (!$SkipBuild) { & ./service/runner/build.ps1 }
+    if (!$SkipBuild -and !$LinuxContainerImage) { & ./service/runner/build.ps1 }
     Add-Type -AssemblyName System.IO.Compression
     $outputDirectory = Join-Path $PSScriptRoot 'output'
     New-Item -ItemType Directory -Force $outputDirectory | Out-Null
@@ -16,11 +16,26 @@ try {
     $packageZip.Dispose()
     $packageStream.Dispose()
     $builds = @()
-    foreach ($device in @('Garmin','iPhone','WhereYouGo')) {
+    $devices = @('Garmin', 'iPhone', 'WhereYouGo')
+    if ($LinuxContainerImage) {
+        $outputDirectory = Join-Path $outputDirectory 'linux'
+        New-Item -ItemType Directory -Force $outputDirectory | Out-Null
+        $devices = @('iPhone')
+    }
+    foreach ($device in $devices) {
         $filename = 'demonstration-' + $device + '.gwc'
         $gwc = Join-Path $outputDirectory $filename
         $report = Join-Path $outputDirectory ($device + '-result.json')
-        & ./bin/Release/CompilerJob.exe $packagePath $device $gwc $report
+        if ($LinuxContainerImage) {
+            $identity = "$(id -u):$(id -g)"
+            & docker run --rm --network none --memory 512m --cpus 1 --user $identity --read-only `
+                --cap-drop ALL --security-opt no-new-privileges `
+                --mount "type=bind,source=$packagePath,target=/source.gwz,readonly" `
+                --mount "type=bind,source=$outputDirectory,target=/output" `
+                $LinuxContainerImage /source.gwz $device "/output/$filename" "/output/$device-result.json"
+        } else {
+            & ./bin/Release/CompilerJob.exe $packagePath $device $gwc $report
+        }
         $result = Get-Content -Raw $report | ConvertFrom-Json
         if ($LASTEXITCODE -ne 0 -or !$result.ok) { throw ($device + ': ' + ($result.messages -join '; ')) }
         $bytes = [System.IO.File]::ReadAllBytes($gwc)

@@ -78,3 +78,13 @@ jobs:
       - name: Compile the trusted smoke fixture in the Linux container
         shell: pwsh
         run: ./service/test/native-smoke.ps1 -LinuxContainerImage wherigo-compiler-job
+      - name: Build the approved iPhone demo with Linux
+        shell: pwsh
+        run: ./service/demo/build-demo.ps1 -LinuxContainerImage wherigo-compiler-job
+      - name: Attach the Linux-built iPhone demo
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wherigo-linux-iphone-demo
+          path: service/demo/output/linux/demonstration-iPhone.gwc
+          if-no-files-found: error
+          retention-days: 1
