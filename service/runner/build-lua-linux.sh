@@ -7,7 +7,13 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 cd "$work"
 
-curl --fail --silent --show-error --location https://www.lua.org/ftp/lua-5.1.5.tar.gz -o lua.tar.gz
+# Debian mirrors the same upstream archive. Bound connection time so an
+# unavailable lua.org does not stall the build before reaching the mirror.
+if ! curl --fail --silent --show-error --location --connect-timeout 10 --max-time 30 \
+    https://www.lua.org/ftp/lua-5.1.5.tar.gz -o lua.tar.gz; then
+    curl --fail --silent --show-error --location --connect-timeout 10 --max-time 30 \
+        https://deb.debian.org/debian/pool/main/l/lua5.1/lua5.1_5.1.5.orig.tar.gz -o lua.tar.gz
+fi
 echo '2640fc56a795f29d28ef15e13c34a47e223960b0240e8cb0a82d9b0738695333  lua.tar.gz' | sha256sum -c -
 tar -xzf lua.tar.gz
 cd lua-5.1.5/src
