@@ -1,5 +1,6 @@
 // Decimal bytes: leave headroom below R2's included 10 GB-month allowance.
 export const CAP_BYTES = 9_000_000_000;
+export const PREVIEW_CAP_BYTES = 750_000_000;
 export const MAX_FILE_BYTES = 20_000_000;
 export const RETENTION_MS = 24 * 60 * 60 * 1000;
 export const DEVICES = ['Emulator', 'Garmin', 'iPad', 'iPhone', 'OpenWIG', 'PPC2003', 'WFPlayer', 'WhereYouGo', 'XMarksTheSpot'];

@@ -1,4 +1,4 @@
-import {CAP_BYTES, MAX_FILE_BYTES, RETENTION_MS, DEVICES, HttpError, assert, boundedBytes, sourceFile, gwcFile, selectedDevices, reservation} from './policy.js';
+import {CAP_BYTES, PREVIEW_CAP_BYTES, MAX_FILE_BYTES, RETENTION_MS, DEVICES, HttpError, assert, boundedBytes, sourceFile, gwcFile, selectedDevices, reservation} from './policy.js';
 
 const json = (value, status = 200) => new Response(JSON.stringify(value), {status, headers: {'Content-Type': 'application/json', 'Cache-Control': 'no-store'}});
 const authenticated = (request, secret) => Boolean(secret) && request.headers.get('Authorization') === `Bearer ${secret}`;
@@ -6,17 +6,6 @@ const jobKey = id => `job:${id}`;
 const previewKey = id => `preview:${id}`;
 const listingFields = {title:160, description:4000, country:120, region:120, time:50, coordinates:120, starting:2000};
 const previewDevices = ['Emulator', 'iPhone', 'WhereYouGo'];
-
-async function requirePreviewPlayer(request, secret) {
-  assert(secret, 503, 'Preview publishing is currently unavailable.');
-  const header = request.headers.get('Authorization') || '';
-  const value = header.startsWith('Bearer ') ? header.slice(7) : '';
-  assert(value.length > 0 && value.length <= 128, 401, 'Enter the preview player code.');
-  const encoder = new TextEncoder();
-  const key = await crypto.subtle.importKey('raw', encoder.encode(secret), {name: 'HMAC', hash: 'SHA-256'}, false, ['sign', 'verify']);
-  const expected = await crypto.subtle.sign('HMAC', key, encoder.encode(secret));
-  assert(await crypto.subtle.verify('HMAC', key, expected, encoder.encode(value)), 401, 'The preview player code is incorrect.');
-}
 
 function previewDetails(details) {
   assert(details && typeof details === 'object', 400, 'Enter cartridge listing details.');
@@ -221,16 +210,14 @@ export class CompilerCoordinator {
     }
     const publish = path.match(/^\/api\/v1\/preview\/uploads\/([a-f0-9-]{36})\/publish$/);
     if (method !== 'POST' || (!publish && path !== '/api/v1/preview/uploads')) throw new HttpError(404, 'Not found.');
-    await requirePreviewPlayer(request, this.env.PREVIEW_PLAYER_CODE);
+    await this.countRequest();
     if (!publish) {
       const heartbeat = await this.ctx.storage.get('runnerHeartbeat');
       assert(this.env.SERVICE_ENABLED === 'true' && Date.now() - (heartbeat || 0) < 120_000, 503, 'The cartridge checker is currently unavailable.');
-      const jobs = await this.ctx.storage.list({prefix: 'job:'});
-      const active = [...jobs.values()].filter(job => job.purpose === 'preview' && job.expiresAt > Date.now());
-      assert(active.length < 12, 429, 'The preview upload limit has been reached. Try again after older uploads expire.');
       const {bytes, filename} = await this.input(request, true);
       return this.createJob(bytes, previewDevices, previewDevices.slice(1), false, {purpose:'preview', filename});
     }
+    // The random upload ID is the private capability for this publication.
     const job = await this.job(publish[1]);
     assert(job.purpose === 'preview' && this.previewReady(job), 409, 'This preview upload must pass its cartridge check before publishing.');
     if (job.previewListingId) return json({id: job.previewListingId, status:'published'});
@@ -238,8 +225,6 @@ export class CompilerCoordinator {
     try { payload = JSON.parse(new TextDecoder().decode(await boundedBytes(request, 16_000))); }
     catch (error) { if (error instanceof HttpError) throw error; throw new HttpError(400, 'Enter valid listing details.'); }
     const details = previewDetails(payload);
-    const entries = await this.ctx.storage.list({prefix:'preview:'});
-    assert([...entries.values()].filter(entry => entry.listing.expiresAt > Date.now()).length < 6, 429, 'The preview catalog already has six cartridges. Try again after a listing expires.');
     const id = crypto.randomUUID();
     const downloads = job.results.filter(r => r.ok && job.downloads.includes(r.device)).map(({device}) => ({
       device, label: device === 'WhereYouGo' ? 'Android · WhereYouGo' : device,
@@ -269,6 +254,12 @@ export class CompilerCoordinator {
     const job = {id, devices, downloads, sourceSize: bytes.length, budget: reservation(bytes.length, downloads),
       createdAt: now, expiresAt: now + RETENTION_MS, status: 'uploading', results: [], builds: {}, demo,
       purpose: upload.purpose || 'test', filename: upload.filename || ''};
+    if (job.purpose === 'preview') {
+      const jobs = await this.ctx.storage.list({prefix: 'job:'});
+      // Expired files still count until R2 confirms deletion.
+      const used = [...jobs.values()].reduce((total, entry) => total + (entry.purpose === 'preview' ? entry.budget : 0), 0);
+      assert(used + job.budget <= PREVIEW_CAP_BYTES, 507, 'The 750 MB preview storage is full. Try again after older uploads expire.');
+    }
     await this.reserve(job.budget);
     await this.ctx.storage.put(jobKey(id), job);
     // Schedule cleanup BEFORE uploading, so a crash cannot strand a temporary job.
@@ -359,9 +350,20 @@ export class CompilerCoordinator {
           .filter(([key]) => typeof metadata?.[key] === 'string')
           .map(([key, max]) => [key, metadata[key].trim().slice(0, max)]));
       }
-      // Keep the conservative reservation until confirmed deletion. This also
-      // counts uncertain writes following a crash against the global cap.
-      await this.ctx.storage.put(jobKey(job.id), job);
+      if (job.purpose === 'preview' && this.previewReady(job)) {
+        // Keep the full allowance for a write whose outcome is uncertain.
+        const storedBytes = job.downloads.reduce((total, device) => {
+          const build = job.builds[device];
+          return total + (build?.status === 'ready' ? build.bytes : build ? MAX_FILE_BYTES : 0);
+        }, job.sourceSize);
+        await this.ctx.storage.transaction(async tx => {
+          const used = (await tx.get('reservedBytes')) || 0;
+          await tx.put('reservedBytes', used - (job.budget - storedBytes));
+          await tx.put(jobKey(job.id), {...job, budget:storedBytes});
+        });
+      } else {
+        await this.ctx.storage.put(jobKey(job.id), job);
+      }
       if (job.demo && job.results.every(r => r.ok)) await this.ctx.storage.put('latestDemo', job.id);
       return json({ok: true});
     }
