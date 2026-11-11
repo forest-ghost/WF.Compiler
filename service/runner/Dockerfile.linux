@@ -1,0 +1,18 @@
+# Build from the repository root with --platform linux/amd64.
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
+RUN apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev curl ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+WORKDIR /src
+COPY . .
+RUN test "$(uname -m)" = x86_64 && sh service/runner/build-lua-linux.sh /native
+RUN dotnet publish service/runner/CompilerJob.csproj -c Release \
+    -p:CompilerLinux=true -o /publish
+
+FROM mcr.microsoft.com/dotnet/runtime:10.0
+WORKDIR /app
+COPY --from=build /publish/ .
+COPY --from=build /native/libwherigo-lua51.so .
+COPY --from=build /native/LUA-LICENSE.html .
+ENV DOTNET_EnableDiagnostics=0
+USER $APP_UID
+ENTRYPOINT ["dotnet", "/app/CompilerJob.dll"]

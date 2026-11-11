@@ -7,11 +7,13 @@
     <AssemblyName>WF.Compiler</AssemblyName>
     <Version>0.9.8</Version>
 
-    <!-- lua5.1.dll is a 32-bit Windows DLL, so the compiler must stay x86 for now -->
-    <PlatformTarget>x86</PlatformTarget>
-    <RuntimeIdentifier>win-x86</RuntimeIdentifier>
+    <!-- The bundled Windows Lua DLL requires x86. -->
+    <PlatformTarget Condition="'$(CompilerLinux)' != 'true'">x86</PlatformTarget>
+    <RuntimeIdentifier Condition="'$(CompilerLinux)' != 'true'">win-x86</RuntimeIdentifier>
+    <RuntimeIdentifier Condition="'$(CompilerLinux)' == 'true'">linux-x64</RuntimeIdentifier>
     <!-- Self contained, so build machines and containers don't need an x86 .NET runtime installed -->
-    <SelfContained>true</SelfContained>
+    <SelfContained Condition="'$(CompilerLinux)' != 'true'">true</SelfContained>
+    <SelfContained Condition="'$(CompilerLinux)' == 'true'">false</SelfContained>
 
     <!-- Keep the original Properties/AssemblyInfo.cs (it uses a 0.9.8.* wildcard version) -->
     <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
@@ -20,8 +22,8 @@
     <ImplicitUsings>disable</ImplicitUsings>
     <Nullable>disable</Nullable>
 
-    <!-- System.Drawing only works on Windows on modern .NET; that's fine while we're x86 Windows only -->
-    <NoWarn>$(NoWarn);CA1416</NoWarn>
+    <NoWarn Condition="'$(RuntimeIdentifier)' == 'win-x86'">$(NoWarn);CA1416</NoWarn>
+    <DefineConstants Condition="'$(CompilerLinux)' == 'true'">$(DefineConstants);LINUX_COMPILER</DefineConstants>
   </PropertyGroup>
 
   <ItemGroup>
@@ -32,14 +34,16 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="System.Drawing.Common" Version="10.0.0" />
+    <PackageReference Condition="'$(CompilerLinux)' != 'true'" Include="System.Drawing.Common" Version="10.0.0" />
+    <PackageReference Condition="'$(CompilerLinux)' == 'true'" Include="SkiaSharp" Version="4.152.3" />
+    <PackageReference Condition="'$(CompilerLinux)' == 'true'" Include="SkiaSharp.NativeAssets.Linux.NoDependencies" Version="4.152.3" />
   </ItemGroup>
 
   <ItemGroup>
     <!-- Resource names must match the GetManifestResourceStream calls -->
     <EmbeddedResource Include="Resources/Wherigo.luac" LogicalName="WF.Compiler.Resources.Wherigo.luac" />
     <EmbeddedResource Include="Eluant/BindingSupport.lua" LogicalName="WF.Compiler.Eluant.BindingSupport.lua" />
-    <None Update="lua5.1.dll" CopyToOutputDirectory="PreserveNewest" />
+    <None Condition="'$(CompilerLinux)' != 'true'" Update="lua5.1.dll" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

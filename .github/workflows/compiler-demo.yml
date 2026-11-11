@@ -63,3 +63,18 @@ jobs:
           Download the one-day artifact above, or use the website links if publication was enabled.
           This workflow tests the compiler project; it is not an unrestricted website compilation service.
           "@ >> $env:GITHUB_STEP_SUMMARY
+
+  linux-smoke:
+    if: ${{ github.event.repository.private == false }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out the approved source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Build the Linux compiler image
+        run: docker build --platform linux/amd64 -f service/runner/Dockerfile.linux -t wherigo-compiler-job .
+      - name: Compile the trusted smoke fixture in the Linux container
+        shell: pwsh
+        run: ./service/test/native-smoke.ps1 -LinuxContainerImage wherigo-compiler-job

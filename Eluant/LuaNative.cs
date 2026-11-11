@@ -65,7 +65,9 @@ namespace Eluant
 
 	#if MONOTOUCH
 		const string LUA_DLL = "__Internal";
-	#else
+    #elif LINUX_COMPILER
+        const string LUA_DLL = "libwherigo-lua51.so";
+    #else
         const string LUA_DLL = "lua5.1.dll";
 	#endif
 
@@ -328,7 +330,7 @@ namespace Eluant
 		public static extern int luaL_loadbuffer(IntPtr L, [MarshalAs(UnmanagedType.LPStr)] string s, int sz, [MarshalAs(UnmanagedType.LPStr)] string name);
 
 		[DllImport(LUA_DLL, CallingConvention = CallingConvention.Cdecl, EntryPoint = "luaL_loadbuffer")]
-		public static extern int luaL_loadbuffer(IntPtr L, byte[] s, int sz, [MarshalAs(UnmanagedType.LPStr)] string name);
+		public static extern int luaL_loadbuffer(IntPtr L, byte[] s, UIntPtr sz, [MarshalAs(UnmanagedType.LPStr)] string name);
 
 		[DllImport(LUA_DLL, CallingConvention = CallingConvention.Cdecl, EntryPoint = "luaL_newmetatable")]
 		public static extern int luaL_newmetatable(IntPtr L, [MarshalAs(UnmanagedType.LPStr)] string tname);
