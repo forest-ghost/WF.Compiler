@@ -4,6 +4,7 @@ const json = (value, status = 200) => new Response(JSON.stringify(value), {statu
 const authenticated = (request, secret) => Boolean(secret) && request.headers.get('Authorization') === `Bearer ${secret}`;
 const jobKey = id => `job:${id}`;
 const previewKey = id => `preview:${id}`;
+const listingFields = {title:160, description:4000, country:120, region:120, time:50, coordinates:120, starting:2000};
 const previewDevices = ['Emulator', 'iPhone', 'WhereYouGo'];
 
 async function requirePreviewPlayer(request, secret) {
@@ -20,9 +21,8 @@ async function requirePreviewPlayer(request, secret) {
 function previewDetails(details) {
   assert(details && typeof details === 'object', 400, 'Enter cartridge listing details.');
   assert(details.permission === true, 400, 'Confirm you have permission to share the playable cartridge.');
-  const fields = {title:160, description:4000, country:120, region:120, time:50, coordinates:120, starting:2000};
   const listing = {};
-  for (const [name, max] of Object.entries(fields)) {
+  for (const [name, max] of Object.entries(listingFields)) {
     const value = details[name] ?? '';
     assert(typeof value === 'string' && value.trim().length <= max, 400, `Check the listing’s ${name} field.`);
     listing[name] = value.trim();
@@ -164,7 +164,8 @@ export class CompilerCoordinator {
       assert(!uploadMatch[3] && method === 'GET', 405, 'Method not allowed.');
       return json({uploadId: job.id, filename: job.filename, expiresAt: job.expiresAt,
         status: valid ? 'valid' : job.status === 'failed' || job.status === 'done' ? 'invalid' : 'checking',
-        messages: job.results.flatMap(r => r.messages || [])});
+        messages: job.results.flatMap(r => r.messages || []),
+        ...(valid && job.purpose === 'preview' ? {metadata: job.metadata || {}} : {})});
     }
     if (path === '/api/v1/demo' && method === 'GET') {
       const id = await this.ctx.storage.get('latestDemo');
@@ -317,7 +318,7 @@ export class CompilerCoordinator {
         if (job.status !== 'queued' || job.expiresAt <= Date.now()) continue;
         job.status = 'running'; job.startedAt = Date.now(); job.lease = crypto.randomUUID();
         await this.ctx.storage.put(jobKey(job.id), job);
-        return json({jobId: job.id, lease: job.lease, devices: job.devices, downloads: job.downloads});
+        return json({jobId: job.id, lease: job.lease, devices: job.devices, downloads: job.downloads, purpose: job.purpose});
       }
       return new Response(null, {status: 204});
     }
@@ -352,6 +353,12 @@ export class CompilerCoordinator {
         return {device: r.device, ok: r.ok, messages: (Array.isArray(r.messages) ? r.messages : []).slice(0, 8).map(m => String(m).slice(0, 2000))};
       });
       job.status = job.results.some(r => r.ok) ? 'done' : 'failed';
+      if (job.purpose === 'preview') {
+        const metadata = data.results.find(r => r.device === 'Emulator' && r.ok)?.metadata;
+        job.metadata = Object.fromEntries(Object.entries(listingFields)
+          .filter(([key]) => typeof metadata?.[key] === 'string')
+          .map(([key, max]) => [key, metadata[key].trim().slice(0, max)]));
+      }
       // Keep the conservative reservation until confirmed deletion. This also
       // counts uncertain writes following a crash against the global cap.
       await this.ctx.storage.put(jobKey(job.id), job);

@@ -91,7 +91,7 @@ while (true) {
             if (bytes.length > MAX_FILE_BYTES) throw Error('Compiled file exceeds 20 MB.');
             await api(`/internal/runner/${job.jobId}/build/${device}`, {method:'PUT',headers,body:bytes});
           }
-          results.push(report);
+          results.push(job.purpose === 'preview' ? report : {device, ok:report.ok, messages:report.messages});
         } catch (error) { results.push({device,ok:false,messages:[error.message]}); }
       }
       await api(`/internal/runner/${job.jobId}/complete`, {method:'POST',headers,body:JSON.stringify({results})});

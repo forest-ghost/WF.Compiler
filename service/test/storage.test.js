@@ -292,9 +292,12 @@ test('preview players can publish verified builds, and the listing expires with 
   assert.deepEqual(downloads, ['iPhone', 'WhereYouGo']);
   const internal = '/internal/runner/' + uploadId;
   assert.equal((await coordinator.fetch(req(internal + '/build/iPhone', {method:'PUT', headers:runnerHeaders(lease), body:gwc}))).status, 200);
-  const results = devices.map(device => ({device, ok:device !== 'WhereYouGo'}));
+  const metadata = {title:'Extracted cartridge title', coordinates:'Play Anywhere', country:'Canada', region:'Ontario'};
+  const results = devices.map(device => ({device, ok:device !== 'WhereYouGo', metadata:{...metadata, ignored:'private'}}));
   assert.equal((await coordinator.fetch(req(internal + '/complete', {method:'POST', headers:runnerHeaders(lease), body:JSON.stringify({results})}))).status, 200);
-  assert.equal((await (await coordinator.fetch(req('/api/v1/uploads/' + uploadId))).json()).status, 'valid');
+  const checked = await (await coordinator.fetch(req('/api/v1/uploads/' + uploadId))).json();
+  assert.equal(checked.status, 'valid');
+  assert.deepEqual(checked.metadata, metadata);
   assert.equal((await publish(false)).status, 400);
   assert.equal((await publish(true, {})).status, 401);
   assert.equal((await publish(true, {Authorization:'Bearer wrong'})).status, 401);
