@@ -7,7 +7,8 @@
     <AssemblyName>CompilerJob</AssemblyName>
     <PlatformTarget Condition="'$(CompilerLinux)' != 'true'">x86</PlatformTarget>
     <RuntimeIdentifier Condition="'$(CompilerLinux)' != 'true'">win-x86</RuntimeIdentifier>
-    <RuntimeIdentifier Condition="'$(CompilerLinux)' == 'true'">linux-x64</RuntimeIdentifier>
+    <CompilerLinuxArch Condition="'$(CompilerLinuxArch)' == ''">x64</CompilerLinuxArch>
+    <RuntimeIdentifier Condition="'$(CompilerLinux)' == 'true'">linux-$(CompilerLinuxArch)</RuntimeIdentifier>
     <SelfContained Condition="'$(CompilerLinux)' != 'true'">true</SelfContained>
     <SelfContained Condition="'$(CompilerLinux)' == 'true'">false</SelfContained>
     <ImplicitUsings>disable</ImplicitUsings>

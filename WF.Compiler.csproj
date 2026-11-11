@@ -10,7 +10,8 @@
     <!-- The bundled Windows Lua DLL requires x86. -->
     <PlatformTarget Condition="'$(CompilerLinux)' != 'true'">x86</PlatformTarget>
     <RuntimeIdentifier Condition="'$(CompilerLinux)' != 'true'">win-x86</RuntimeIdentifier>
-    <RuntimeIdentifier Condition="'$(CompilerLinux)' == 'true'">linux-x64</RuntimeIdentifier>
+    <CompilerLinuxArch Condition="'$(CompilerLinuxArch)' == ''">x64</CompilerLinuxArch>
+    <RuntimeIdentifier Condition="'$(CompilerLinux)' == 'true'">linux-$(CompilerLinuxArch)</RuntimeIdentifier>
     <!-- Self contained, so build machines and containers don't need an x86 .NET runtime installed -->
     <SelfContained Condition="'$(CompilerLinux)' != 'true'">true</SelfContained>
     <SelfContained Condition="'$(CompilerLinux)' == 'true'">false</SelfContained>
