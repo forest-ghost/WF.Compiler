@@ -1,15 +1,24 @@
-import {CAP_BYTES, PREVIEW_CAP_BYTES, MAX_FILE_BYTES, RETENTION_MS, DEVICES, HttpError, assert, boundedBytes, sourceFile, gwcFile, selectedDevices, reservation} from './policy.js';
+import {CAP_BYTES, PREVIEW_CAP_BYTES, PRIVATE_CAP_BYTES, PRIVATE_MAX_FAILURES, PRIVATE_LOCK_MS, MAX_FILE_BYTES, RETENTION_MS, DEVICES, HttpError, assert, boundedBytes, sourceFile, gwcFile, selectedDevices, reservation} from './policy.js';
 
 const json = (value, status = 200) => new Response(JSON.stringify(value), {status, headers: {'Content-Type': 'application/json', 'Cache-Control': 'no-store'}});
 const authenticated = (request, secret) => Boolean(secret) && request.headers.get('Authorization') === `Bearer ${secret}`;
 const jobKey = id => `job:${id}`;
 const previewKey = id => `preview:${id}`;
+const privateKey = id => `private:${id}`;
+const privateDevices = ['iPhone', 'WhereYouGo'];
+// Compares the code without stopping at the first wrong digit.
+function sameCode(given, expected) {
+  if (typeof given !== 'string' || given.length !== expected.length) return false;
+  let diff = 0;
+  for (let i = 0; i < expected.length; i++) diff |= given.charCodeAt(i) ^ expected.charCodeAt(i);
+  return diff === 0;
+}
 const listingFields = {title:160, description:4000, country:120, region:120, time:50, coordinates:120, starting:2000};
 const previewDevices = ['Emulator', 'iPhone', 'WhereYouGo'];
 
-function previewDetails(details) {
+function previewDetails(details, requirePermission = true) {
   assert(details && typeof details === 'object', 400, 'Enter cartridge listing details.');
-  assert(details.permission === true, 400, 'Confirm you have permission to share the playable cartridge.');
+  assert(!requirePermission || details.permission === true, 400, 'Confirm you have permission to share the playable cartridge.');
   const listing = {};
   for (const [name, max] of Object.entries(listingFields)) {
     const value = details[name] ?? '';
@@ -18,6 +27,21 @@ function previewDetails(details) {
   }
   assert(listing.title && listing.coordinates, 400, 'Enter a title and starting coordinates, or enter Play Anywhere.');
   return listing;
+}
+
+// "N 38° 35.123 W 090° 30.456" (the site's format) or "38.58538, -90.50760" to decimal degrees.
+export function parseCoordinates(text) {
+  const value = String(text || '').trim();
+  let lat, lon;
+  const dm = /^([NS])\s*(\d{1,2})\s*°?\s*(\d{1,2}(?:\.\d+)?)?\s*'?\s*,?\s*([EW])\s*(\d{1,3})\s*°?\s*(\d{1,2}(?:\.\d+)?)?\s*'?$/i.exec(value);
+  const dec = /^(-?\d{1,2}(?:\.\d+)?)\s*[, ]\s*(-?\d{1,3}(?:\.\d+)?)$/.exec(value);
+  if (dm) {
+    lat = (/s/i.test(dm[1]) ? -1 : 1) * (+dm[2] + (+dm[3] || 0) / 60);
+    lon = (/w/i.test(dm[4]) ? -1 : 1) * (+dm[5] + (+dm[6] || 0) / 60);
+  } else if (dec) { lat = +dec[1]; lon = +dec[2]; }
+  else return null;
+  if (!(Math.abs(lat) <= 90 && Math.abs(lon) <= 180)) return null;
+  return {latitude: +lat.toFixed(6), longitude: +lon.toFixed(6)};
 }
 
 export default {
@@ -36,8 +60,9 @@ export default {
     if (origin) {
       headers.set('Access-Control-Allow-Origin', origin);
       headers.set('Vary', 'Origin');
-      headers.set('Access-Control-Allow-Methods', 'GET, POST, PUT, OPTIONS');
-      headers.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+      headers.set('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+      headers.set('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Private-Code');
+      headers.set('Access-Control-Expose-Headers', 'Content-Disposition');
     }
     headers.set('X-Content-Type-Options', 'nosniff');
     headers.set('Referrer-Policy', 'no-referrer');
@@ -131,6 +156,7 @@ export class CompilerCoordinator {
     }
     if (path.startsWith('/api/v1/compile') || path.startsWith('/api/v1/uploads') || path === '/api/v1/demo') await this.countRequest();
     if (path.startsWith('/api/v1/preview/')) return this.preview(request, path);
+    if (path.startsWith('/api/v1/private/')) { await this.countRequest(); return this.privateRoute(request, path); }
     if (path === '/api/v1/uploads/validate' && method === 'POST') {
       const heartbeat = await this.ctx.storage.get('runnerHeartbeat');
       assert(this.env.SERVICE_ENABLED === 'true' && Date.now() - (heartbeat || 0) < 120_000, 503, 'The cartridge checker is currently unavailable. Your cartridge has not been checked. Please try again later.');
@@ -219,7 +245,7 @@ export class CompilerCoordinator {
     }
     // The random upload ID is the private capability for this publication.
     const job = await this.job(publish[1]);
-    assert(job.purpose === 'preview' && this.previewReady(job), 409, 'This preview upload must pass its cartridge check before publishing.');
+    assert(job.purpose === 'preview' && !job.private && this.previewReady(job), 409, 'This preview upload must pass its cartridge check before publishing.');
     if (job.previewListingId) return json({id: job.previewListingId, status:'published'});
     let payload;
     try { payload = JSON.parse(new TextDecoder().decode(await boundedBytes(request, 16_000))); }
@@ -240,6 +266,98 @@ export class CompilerCoordinator {
     });
     return json({id, status:'published'}, 201);
   }
+  // The private library: one 8 digit code (the PRIVATE_CODE secret) unlocks it in the apps and on the
+  // unlisted Forest-Ghost page. Wrong codes from anyone count toward one hourly limit, so guessing is
+  // not practical. Files live in SOURCES under private/ and never expire.
+  async checkCode(request) {
+    const expected = this.env.PRIVATE_CODE;
+    assert(typeof expected === 'string' && /^\d{8}$/.test(expected), 503, 'The private library is not set up yet.');
+    const now = Date.now();
+    const saved = await this.ctx.storage.get('privateFailures');
+    const state = saved && now - saved.since < PRIVATE_LOCK_MS ? saved : {count: 0, since: now};
+    assert(state.count < PRIVATE_MAX_FAILURES, 429, 'Too many wrong codes. The private library is locked for up to an hour.');
+    if (sameCode(request.headers.get('X-Private-Code') || '', expected)) return;
+    await this.ctx.storage.put('privateFailures', {count: state.count + 1, since: state.since});
+    throw new HttpError(401, 'That code is not right.');
+  }
+  async privateRoute(request, path) {
+    const method = request.method;
+    await this.checkCode(request);
+    if (path === '/api/v1/private/session' && method === 'POST') return json({ok: true, owner: 'Forest-Ghost'});
+    if (path === '/api/v1/private/cartridges' && method === 'GET') {
+      const entries = await this.ctx.storage.list({prefix: 'private:'});
+      return json({items: [...entries.values()].map(entry => ({...entry.listing, status: entry.status}))
+        .sort((a, b) => b.created.localeCompare(a.created))});
+    }
+    if (path === '/api/v1/private/uploads' && method === 'POST') {
+      const heartbeat = await this.ctx.storage.get('runnerHeartbeat');
+      assert(this.env.SERVICE_ENABLED === 'true' && Date.now() - (heartbeat || 0) < 120_000, 503, 'The cartridge checker is currently unavailable.');
+      const {bytes, filename} = await this.input(request, true);
+      // Same check and builds as a public preview upload, so the runner treats it exactly the same.
+      return this.createJob(bytes, previewDevices, previewDevices.slice(1), false, {purpose: 'preview', filename, private: true});
+    }
+    const publish = path.match(/^\/api\/v1\/private\/uploads\/([a-f0-9-]{36})\/publish$/);
+    if (publish && method === 'POST') return this.publishPrivate(request, publish[1]);
+    const item = path.match(/^\/api\/v1\/private\/cartridges\/([a-f0-9-]{36})(?:\/download\/(iPhone|WhereYouGo))?$/);
+    assert(item, 404, 'Not found.');
+    const entry = await this.ctx.storage.get(privateKey(item[1]));
+    assert(entry, 404, 'That private cartridge was not found.');
+    if (item[2]) {
+      assert(method === 'GET' && entry.status === 'ready' && entry.files[item[2]], 404, 'This download is not available.');
+      const object = await this.env.SOURCES.get(entry.files[item[2]]);
+      assert(object, 410, 'This private file is missing. Delete the cartridge and upload it again.');
+      const name = String(entry.listing.title || 'cartridge').replace(/[^A-Za-z0-9 ._-]+/g, '').trim().replace(/\s+/g, '-').slice(0, 80) || 'cartridge';
+      return new Response(object.body, {headers: {'Content-Type': 'application/octet-stream',
+        'Content-Disposition': `attachment; filename="${name}-${item[2]}.gwc"`, 'Cache-Control': 'private, no-store'}});
+    }
+    if (method === 'GET') return json({...entry.listing, status: entry.status});
+    assert(method === 'DELETE', 405, 'Method not allowed.');
+    await this.env.SOURCES.delete([entry.source, ...Object.values(entry.files)]);
+    await this.ctx.storage.transaction(async tx => {
+      const used = (await tx.get('reservedBytes')) || 0;
+      await tx.put('reservedBytes', Math.max(0, used - entry.bytes));
+      await tx.delete(privateKey(item[1]));
+    });
+    return json({ok: true});
+  }
+  async publishPrivate(request, uploadId) {
+    const job = await this.job(uploadId);
+    assert(job.purpose === 'preview' && job.private && this.previewReady(job), 409, 'This upload must pass its cartridge check before publishing.');
+    if (job.privateListingId) return json({id: job.privateListingId, status: 'published'});
+    let payload;
+    try { payload = JSON.parse(new TextDecoder().decode(await boundedBytes(request, 16_000))); }
+    catch (error) { if (error instanceof HttpError) throw error; throw new HttpError(400, 'Enter valid listing details.'); }
+    const details = previewDetails(payload, false);
+    const devices = job.results.filter(r => r.ok && job.downloads.includes(r.device)).map(r => r.device)
+      .filter(device => privateDevices.includes(device));
+    const bytes = job.sourceSize + devices.reduce((total, device) => total + (job.builds[device]?.bytes || MAX_FILE_BYTES), 0);
+    const existing = await this.ctx.storage.list({prefix: 'private:'});
+    const used = [...existing.values()].reduce((total, entry) => total + entry.bytes, 0);
+    assert(used + bytes <= PRIVATE_CAP_BYTES, 507, 'The 1 GB private library is full. Delete an old test cartridge first.');
+    await this.reserve(bytes);
+    const id = crypto.randomUUID(), created = new Date().toISOString();
+    const files = Object.fromEntries(devices.map(device => [device, `private/${id}/${device}.gwc`]));
+    const source = `private/${id}/source.gwz`;
+    const point = parseCoordinates(details.coordinates);
+    const listing = {...details, id, created, updated: created, author: 'Forest-Ghost', ownerId: 'forest-ghost',
+      type: 'Cartridge', about: details.description, image: 'cartridge-topographic-device-solid-v1.webp',
+      anywhere: /^play anywhere$/i.test(details.coordinates), latitude: point?.latitude ?? null, longitude: point?.longitude ?? null,
+      openSource: false, private: true, filename: job.filename,
+      downloads: devices.map(device => ({device, label: device === 'WhereYouGo' ? 'Android · WhereYouGo' : device,
+        url: `/api/v1/private/cartridges/${id}/download/${device}`, bytes: job.builds[device]?.bytes ?? null}))};
+    // Record the entry before copying so an interrupted copy stays counted and can still be deleted.
+    await this.ctx.storage.put(privateKey(id), {uploadId: job.id, listing, files, source, bytes, status: 'writing'});
+    for (const [from, to] of [[`${job.id}/source.gwz`, source], ...devices.map(device => [`${job.id}/${device}.gwc`, files[device]])]) {
+      const object = await this.env.TEMPORARY.get(from);
+      assert(object, 410, 'This upload has expired. Upload the cartridge again.');
+      await this.env.SOURCES.put(to, object.body, {httpMetadata: {contentType: to.endsWith('.gwz') ? 'application/zip' : 'application/octet-stream'}});
+    }
+    await this.ctx.storage.transaction(async tx => {
+      await tx.put(privateKey(id), {uploadId: job.id, listing, files, source, bytes, status: 'ready'});
+      await tx.put(jobKey(job.id), {...job, privateListingId: id});
+    });
+    return json({id, status: 'published'}, 201);
+  }
   async input(request, validationOnly = false) {
     const body = await boundedBytes(request, MAX_FILE_BYTES + 100_000);
     const form = await new Response(body, {headers: {'Content-Type': request.headers.get('Content-Type') || ''}}).formData();
@@ -253,7 +371,7 @@ export class CompilerCoordinator {
     const now = Date.now(), id = crypto.randomUUID();
     const job = {id, devices, downloads, sourceSize: bytes.length, budget: reservation(bytes.length, downloads),
       createdAt: now, expiresAt: now + RETENTION_MS, status: 'uploading', results: [], builds: {}, demo,
-      purpose: upload.purpose || 'test', filename: upload.filename || ''};
+      purpose: upload.purpose || 'test', filename: upload.filename || '', ...(upload.private ? {private: true} : {})};
     if (job.purpose === 'preview') {
       const jobs = await this.ctx.storage.list({prefix: 'job:'});
       // Expired files still count until R2 confirms deletion.
