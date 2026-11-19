@@ -135,6 +135,10 @@ namespace WF.Compiler
 			result.Activity = cart["Activity"].ToString();
 			result.StartingLocationDescription = cart["StartingLocationDescription"].ToString();
 			LuaTable zp = cart["StartingLocation"] is LuaBoolean ? null : (LuaTable)cart["StartingLocation"];
+			result.HasStartingLocation = zp != null;
+			result.Country = cart["Country"] is LuaString country ? country.ToString() : null;
+			result.Region = cart["Region"] is LuaString region ? region.ToString()
+				: cart["State"] is LuaString state ? state.ToString() : null;
 			result.Latitude = zp == null ? 0 : (double)((LuaNumber)zp["latitude"]).ToNumber();
 			result.Longitude = zp == null ? 0 : (double)((LuaNumber)zp["longitude"]).ToNumber();
 			result.Altitude = zp == null ? 0 : (cart["StartingLocation"] is LuaBoolean ? 0 : (double)((LuaNumber)((LuaTable)zp["altitude"])["value"]).ToNumber());

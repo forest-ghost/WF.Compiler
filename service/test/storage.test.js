@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import worker, {CompilerCoordinator} from '../src/worker.js';
-import {CAP_BYTES, MAX_FILE_BYTES, RETENTION_MS, boundedBytes} from '../src/policy.js';
+import {CAP_BYTES, PREVIEW_CAP_BYTES, MAX_FILE_BYTES, RETENTION_MS, boundedBytes} from '../src/policy.js';
 
 class Storage {
   values = new Map();
@@ -266,4 +266,83 @@ test('validation refuses to store files when there is no runner',async()=>{
   const {coordinator,env}=setup();env.SERVICE_ENABLED='false';
   assert.equal((await validationUpload(coordinator)).status,503);
   assert.equal(env.TEMPORARY.objects.size,0);
+});
+
+test('preview players can publish verified builds, and the listing expires with its upload', async () => {
+  const {coordinator, env, storage} = setup();
+  const uploadPath = '/api/v1/preview/uploads';
+  const claimPath = '/internal/runner/claim';
+  const catalog = '/api/v1/preview/cartridges';
+  await storage.put('runnerHeartbeat', Date.now());
+  const form = new FormData();
+  form.set('cartridge', new File([zip], 'test.gwz'));
+  const response = await coordinator.fetch(req(uploadPath, {method:'POST', body:form}));
+  assert.equal(response.status, 202);
+  const {uploadId} = await response.json();
+  const publish = (permission = true, id = uploadId) => coordinator.fetch(req(uploadPath + '/' + id + '/publish', {
+    method:'POST', body:JSON.stringify({title:'Preview adventure', coordinates:'Play Anywhere', permission})
+  }));
+  assert.equal((await publish()).status, 409);
+  assert.deepEqual((await (await coordinator.fetch(req(catalog))).json()).items, []);
+  const {lease, devices, downloads} = await (await coordinator.fetch(req(claimPath, {method:'POST', headers:runnerHeaders()}))).json();
+  assert.deepEqual(devices, ['Emulator', 'iPhone', 'WhereYouGo']);
+  assert.deepEqual(downloads, ['iPhone', 'WhereYouGo']);
+  const internal = '/internal/runner/' + uploadId;
+  assert.equal((await coordinator.fetch(req(internal + '/build/iPhone', {method:'PUT', headers:runnerHeaders(lease), body:gwc}))).status, 200);
+  const metadata = {title:'Extracted cartridge title', coordinates:'Play Anywhere', country:'Canada', region:'Ontario'};
+  const results = devices.map(device => ({device, ok:device !== 'WhereYouGo', metadata:{...metadata, ignored:'private'}}));
+  assert.equal((await coordinator.fetch(req(internal + '/complete', {method:'POST', headers:runnerHeaders(lease), body:JSON.stringify({results})}))).status, 200);
+  const checked = await (await coordinator.fetch(req('/api/v1/uploads/' + uploadId))).json();
+  assert.equal(checked.status, 'valid');
+  assert.deepEqual(checked.metadata, metadata);
+  assert.equal((await publish(false)).status, 400);
+  assert.equal((await publish(true, crypto.randomUUID())).status, 410);
+  assert.equal(await storage.get('reservedBytes'), zip.length + gwc.length);
+  const created = await publish();
+  assert.equal(created.status, 201);
+  const {id} = await created.json();
+  assert.notEqual(id, uploadId);
+  assert.equal((await (await publish()).json()).id, id);
+  const {items} = await (await coordinator.fetch(req(catalog))).json();
+  assert.equal(items.length, 1);
+  assert.equal(items[0].ownerId, 'sample-player');
+  assert.equal(items[0].author, 'Sample Player');
+  assert.equal(items[0].anywhere, true);
+  assert.equal(items[0].downloads.length, 1);
+  assert.equal(JSON.stringify(items).includes(uploadId), false);
+  const download = await coordinator.fetch(req(items[0].downloads[0].url));
+  assert.deepEqual(new Uint8Array(await download.arrayBuffer()), gwc);
+  assert.equal((await coordinator.fetch(req(catalog + '/' + id + '/download/WhereYouGo'))).status, 404);
+  assert.equal((await coordinator.fetch(req(catalog + '/' + id + '/download/source.gwz'))).status, 404);
+  assert.equal(env.SOURCES.objects.size, 0);
+  const job = await storage.get('job:' + uploadId);
+  await storage.put('job:' + uploadId, {...job, expiresAt:1});
+  const entry = await storage.get('preview:' + id);
+  await storage.put('preview:' + id, {...entry, listing:{...entry.listing, expiresAt:1}});
+  assert.deepEqual((await (await coordinator.fetch(req(catalog))).json()).items, []);
+  assert.equal((await coordinator.fetch(req(items[0].downloads[0].url))).status, 404);
+  await coordinator.alarm();
+  assert.equal(await storage.get('preview:' + id), undefined);
+  assert.equal(env.TEMPORARY.objects.size, 0);
+});
+
+test('preview quota uses retained bytes and blocks concurrent uploads above 750 MB', async () => {
+  const {coordinator, storage, env} = setup();
+  const budget = zip.length + 2 * MAX_FILE_BYTES;
+  // Expired data still occupies storage until the alarm deletes it.
+  await storage.put('job:older-preview', {id:'older-preview', purpose:'preview', downloads:[], expiresAt:1, budget:PREVIEW_CAP_BYTES - budget});
+  await storage.put('reservedBytes', PREVIEW_CAP_BYTES - budget);
+  await storage.put('runnerHeartbeat', Date.now());
+  const upload = () => {
+    const form = new FormData();
+    form.set('cartridge', new File([zip], 'preview.gwz'));
+    return coordinator.fetch(req('/api/v1/preview/uploads', {method:'POST', body:form}));
+  };
+  const responses = await Promise.all([upload(), upload()]);
+  assert.deepEqual(responses.map(response => response.status).sort(), [202, 507]);
+  assert.equal(await storage.get('reservedBytes'), PREVIEW_CAP_BYTES);
+  assert.equal(env.TEMPORARY.objects.size, 1);
+  await coordinator.alarm();
+  assert.equal(await storage.get('reservedBytes'), budget);
+  assert.equal((await upload()).status, 202);
 });

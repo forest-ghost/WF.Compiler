@@ -27,6 +27,9 @@ namespace WF.Compiler
 		public string Variable;
 		public string Id = "";
 		public string Name = "";
+        public bool HasStartingLocation;
+        public string Country;
+        public string Region;
         public double Latitude = 0;
         public double Longitude = 0;
         public double Altitude = 0;

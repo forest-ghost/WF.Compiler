@@ -17,11 +17,14 @@ public static class CompilerJob
         string source = args[0], device = args[1], output = args[2], report = args[3];
         var messages = new List<string>();
         bool ok = false;
+        object metadata = null;
         try
         {
             if (Array.IndexOf(Allowed, device) < 0) throw new InvalidDataException("Unsupported device.");
             ValidateArchive(source);
-            using (MemoryStream result = Compiler.Download(source, (DeviceType)Enum.Parse(typeof(DeviceType), device), "Test Compiler", ""))
+            using (var input = File.OpenRead(source))
+            using (MemoryStream result = Compiler.Download(input, (DeviceType)Enum.Parse(typeof(DeviceType), device), "Test Compiler", "",
+                device == "Emulator" ? cartridge => metadata = ReadMetadata(cartridge) : null))
             {
                 if (result == null || result.Length < 10 || result.Length > 20000000)
                     throw new InvalidDataException("The compiled file is empty or larger than 20 MB.");
@@ -41,8 +44,37 @@ public static class CompilerJob
             if (error.CodeAfter != null) messages.Add("Line " + (error.Line + 1) + ": " + error.CodeAfter);
         }
         catch (Exception error) { messages.Add(error.Message); }
-        File.WriteAllText(report, JsonSerializer.Serialize(new { device = device, ok = ok, messages = messages }));
+        File.WriteAllText(report, JsonSerializer.Serialize(new { device = device, ok = ok, messages = messages, metadata = ok ? metadata : null }));
         return ok ? 0 : 1;
+    }
+
+    static object ReadMetadata(Cartridge cartridge)
+    {
+        string location = cartridge.HasStartingLocation
+            ? FormattableString.Invariant($"{cartridge.Latitude:0.######}, {cartridge.Longitude:0.######}")
+            : "Play Anywhere";
+        return new {
+            title = Limit(cartridge.Name, 160),
+            description = Limit(cartridge.Description, 4000),
+            coordinates = location,
+            starting = Limit(cartridge.StartingLocationDescription, 2000),
+            country = PlaceName(cartridge.Country, cartridge.CountryId),
+            region = PlaceName(cartridge.Region, cartridge.StateId)
+        };
+    }
+
+    static string Limit(string value, int max)
+    {
+        value = value?.Trim() ?? "";
+        return value == "nil" ? "" : value.Length > max ? value.Substring(0, max) : value;
+    }
+
+    static string PlaceName(string label, string id)
+    {
+        string name = Limit(label, 120);
+        if (name.Length != 0) return name;
+        name = Limit(id, 120);
+        return System.Linq.Enumerable.Any(name, char.IsLetter) ? name : "";
     }
 
     static void ValidateArchive(string source)

@@ -281,6 +281,11 @@ namespace WF.Compiler
 		/// <param name="completitionCode">Completition code.</param>
 		public static MemoryStream Download(Stream ifs, DeviceType device = DeviceType.Emulator, string userName = "WF.Compiler", string completitionCode = "1234567890ABCDE")
 		{
+			return Download(ifs, device, userName, completitionCode, null);
+		}
+
+		public static MemoryStream Download(Stream ifs, DeviceType device, string userName, string completitionCode, Action<Cartridge> readMetadata)
+		{
 			// ---------- Check device ----------
 
 			// ---------- Create GWZ file only (required for upload and download of GWZ file) ----------
@@ -298,6 +303,7 @@ namespace WF.Compiler
 
 			// Load Lua code and extract all required data
 			Cartridge cartridge = inputFormat.Load();
+			readMetadata?.Invoke(cartridge);
 
 			// ---------- Convert cartridge for engine ----------
 

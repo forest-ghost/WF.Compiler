@@ -3,8 +3,7 @@
 For the approved free demonstration without hosting a compiler on this PC, see
 [`demo/README.md`](demo/README.md). Its manual GitHub Actions project workflow
 builds the approved sample and can publish temporary downloads through this
-gateway while live visitor compilation remains disabled. The Windows-host
-requirements below apply to the full arbitrary-upload compiler service.
+gateway while live visitor compilation remains disabled.
 
 ## Current state
 
@@ -40,14 +39,24 @@ checking results and downloading builds: do not publish it in analytics or logs.
 Original test source packages are never available on a public download route.
 
 A trusted Node runner pulls jobs over HTTPS. It passes each source into a
-separate Windows container with no network, a non-admin user, 512 MB memory,
+separate Linux or Windows container with no network, a non-admin user, 512 MB memory,
 one CPU, and a 60-second timeout. Credentials stay in the host runner, outside
 the container. Only that job's input/output directories are mounted. The runner
 uploads genuine generated GWC files and structured device results.
 
-Cloudflare Workers cannot run this native Windows/.NET compiler. A compatible
-Windows container host is required. Docker is not installed on the current PC;
-the container build and sandbox execution have **not** been verified here.
+The native .NET compiler runs on a separate Docker host. On Linux x86-64, build
+and smoke-test it from the repository root:
+
+```sh
+docker build --platform linux/amd64 -f service/runner/Dockerfile.linux -t wherigo-compiler-job .
+pwsh -File service/test/native-smoke.ps1 -LinuxContainerImage wherigo-compiler-job
+```
+
+The Linux runner uses the host process's UID and GID to access each job's
+bind-mounted directories. Run the Node runner as a non-root user with access to
+the Docker daemon. Linux uses SkiaSharp for JPEG conversion and Lua 5.1.5 with
+four-byte string lengths in bytecode to match the existing Windows output
+format. The Windows image uses `service/runner/Dockerfile`.
 Do not expose the legacy compiler directly to the internet or run uploaded Lua
 on the API host. The PC/server running the runner must remain online.
 
@@ -119,9 +128,8 @@ filesystem modules, debug and native library loading is restricted.
 
 ## Deployment still required
 
-1. Select/provision the Windows container host. Check host/image compatibility,
-   build `service/runner/Dockerfile` from the repository root, and verify isolation
-   and timeouts before accepting untrusted uploads. No host has been selected yet.
+1. Select a Docker host, build the corresponding image from the repository root,
+   and verify isolation and timeouts before accepting untrusted uploads.
 2. Use official Wrangler tooling and authorize the intended Cloudflare account.
    `wrangler.jsonc` declares the existing buckets and the global coordinator.
    No paid event-notification queue is needed; the runner pulls jobs.

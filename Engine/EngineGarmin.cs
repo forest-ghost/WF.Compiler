@@ -17,11 +17,7 @@
 ///
 
 using System;
-using System.Drawing;
-using System.Drawing.Imaging;
-using System.IO;
 using System.Collections.Generic;
-using System.Drawing.Drawing2D;
 using System.Text;
 using System.Text.RegularExpressions;
 
@@ -36,8 +32,6 @@ namespace WF.Compiler
 		}
 
 		readonly Encoding _encodingWin1252 = Encoding.GetEncoding(1252);
-		readonly ImageCodecInfo _jpegCodec;
-		readonly EncoderParameters _encParams = new EncoderParameters(2);
 
 		// Put all in the beginning in one line, so that crash report lines are correct
 		// Remove of Garmin crash with cancelled inputs is not possible
@@ -85,19 +79,6 @@ return cartridge";
 			MediaType.FDL,
 			MediaType.TXT
 		};
-
-		public EngineGarmin ()
-		{
-			_jpegCodec = GetEncoderInfo("image/jpeg");
-
-			// Is there a jpeg encoder?
-			// Jpeg image codec
-			if (_jpegCodec == null)
-				throw new InvalidOperationException("No JPEG encoder found");
-
-			_encParams.Param[0] = new EncoderParameter(System.Drawing.Imaging.Encoder.ColorDepth, 24L);
-			_encParams.Param[1] = new EncoderParameter(System.Drawing.Imaging.Encoder.Quality, 90L);
-		}
 
 		/// <summary>
 		/// Converts the Cartridge object in a format valid for the given engine.
@@ -205,22 +186,8 @@ return cartridge";
 			result.Directives = res.Directives;
 
 			if (res.Type.IsImage()) {
-				// Image
-				Image imgLoader;
-				Image img;
-				using(MemoryStream ims = new MemoryStream(res.Data)) {
-					imgLoader = Image.FromStream(ims);
-					img = new Bitmap(imgLoader);
-					// Do special things with the image (resize, bit depth, ...)
-					if (!res.Directives.Contains("noresize") && img.Width > 230)
-						img = ResizeImage(img, 230);
-					// Garmin can only handle jpg
-					using(MemoryStream oms = new MemoryStream()) {
-						img.Save(oms, _jpegCodec, _encParams);
-						result.Data = oms.ToArray();
-					}
-				}
 				result.Type = MediaType.JPG;
+				result.Data = JpegMedia.Convert(res.Data, 230, res.Directives.Contains("noresize"));
 			} else {
 				// Sound
 				if (res.Type == MediaType.FDL) {
@@ -340,46 +307,6 @@ return cartridge";
 			}
 
 			return builder.ToString();
-		}
-
-		#endregion
-
-		#region Graphics
-
-		// Found at: http://tech.pro/tutorial/620/csharp-tutorial-image-editing-saving-cropping-and-resizing
-
-		private ImageCodecInfo GetEncoderInfo(string mimeType)
-		{
-			// Get image codecs for all image formats
-			ImageCodecInfo[] codecs = ImageCodecInfo.GetImageEncoders();
-
-			// Find the correct image codec
-			for (int i = 0; i < codecs.Length; i++)
-				if (codecs[i].MimeType == mimeType)
-					return codecs[i];
-			return null;
-		}
-
-		private static Image ResizeImage(Image imgToResize, int width)
-		{
-			int sourceWidth = imgToResize.Width;
-			int sourceHeight = imgToResize.Height;
-
-			float nPercent = 0;
-
-			nPercent = ((float)width / (float)sourceWidth);
-
-			int destWidth = (int)(sourceWidth * nPercent);
-			int destHeight = (int)(sourceHeight * nPercent);
-
-			Bitmap b = new Bitmap(destWidth, destHeight, PixelFormat.Format24bppRgb);
-			Graphics g = Graphics.FromImage((Image)b);
-			g.InterpolationMode = InterpolationMode.HighQualityBicubic;
-
-			g.DrawImage(imgToResize, 0, 0, destWidth, destHeight);
-			g.Dispose();
-
-			return (Image)b;
 		}
 
 		#endregion

@@ -17,11 +17,7 @@
 ///
 
 using System;
-using System.Drawing;
-using System.Drawing.Imaging;
-using System.IO;
 using System.Collections.Generic;
-using System.Drawing.Drawing2D;
 using System.Text;
 using System.Text.RegularExpressions;
 
@@ -31,8 +27,6 @@ namespace WF.Compiler
 
 	public class EngineiOS : IEngine
 	{
-		readonly ImageCodecInfo _jpegCodec;
-		readonly EncoderParameters _encParams = new EncoderParameters(2);
 
 		string _mediaSelector;
 		int _maxImageWidth;
@@ -66,16 +60,6 @@ namespace WF.Compiler
 				_maxImageWidth = 320;
 				break;
 			}
-
-			_jpegCodec = GetEncoderInfo("image/jpeg");
-
-			// Is there a jpeg encoder?
-			// Jpeg image codec
-			if (_jpegCodec == null)
-				throw new InvalidOperationException("No JPEG encoder found");
-
-			_encParams.Param[0] = new EncoderParameter(System.Drawing.Imaging.Encoder.ColorDepth, 24L);
-			_encParams.Param[1] = new EncoderParameter(System.Drawing.Imaging.Encoder.Quality, 90L);
 		}
 
 		/// <summary>
@@ -142,23 +126,8 @@ namespace WF.Compiler
 			result.Directives = res.Directives;
 
 			if (res.Type.IsImage()) {
-				// Image
-				Image imgLoader;
-				Image img;
-				using(MemoryStream ims = new MemoryStream(res.Data)) {
-					imgLoader = Image.FromStream(ims);
-					img = new Bitmap(imgLoader);
-					// Do special things with the image (resize, bit depth, ...)
-					if (!res.Directives.Contains("noresize") && img.Width > _maxImageWidth)
-						img = ResizeImage(img, _maxImageWidth);
-					// Garmin can only handle jpg
-					using(MemoryStream oms = new MemoryStream()) {
-						img.Save(oms, _jpegCodec, _encParams);
-						result.Type = MediaType.JPG;
-						result.Data = oms.ToArray();
-					}
-				}
 				result.Type = MediaType.JPG;
+				result.Data = JpegMedia.Convert(res.Data, _maxImageWidth, res.Directives.Contains("noresize"));
 			}
 			if (res.Type.IsSound()) {
 				result.Type = res.Type;
@@ -170,45 +139,5 @@ namespace WF.Compiler
 
 			return result;
 		}
-
-		#region Graphics
-
-		// Found at: http://tech.pro/tutorial/620/csharp-tutorial-image-editing-saving-cropping-and-resizing
-
-		private ImageCodecInfo GetEncoderInfo(string mimeType)
-		{
-			// Get image codecs for all image formats
-			ImageCodecInfo[] codecs = ImageCodecInfo.GetImageEncoders();
-
-			// Find the correct image codec
-			for (int i = 0; i < codecs.Length; i++)
-				if (codecs[i].MimeType == mimeType)
-					return codecs[i];
-			return null;
-		}
-
-		private static Image ResizeImage(Image imgToResize, int width)
-		{
-			int sourceWidth = imgToResize.Width;
-			int sourceHeight = imgToResize.Height;
-
-			float nPercent = 0;
-
-			nPercent = ((float)width / (float)sourceWidth);
-
-			int destWidth = (int)(sourceWidth * nPercent);
-			int destHeight = (int)(sourceHeight * nPercent);
-
-			Bitmap b = new Bitmap(destWidth, destHeight, PixelFormat.Format24bppRgb);
-			Graphics g = Graphics.FromImage((Image)b);
-			g.InterpolationMode = InterpolationMode.HighQualityBicubic;
-
-			g.DrawImage(imgToResize, 0, 0, destWidth, destHeight);
-			g.Dispose();
-
-			return (Image)b;
-		}
-
-		#endregion
 	}
 }

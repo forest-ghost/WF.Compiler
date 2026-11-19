@@ -548,6 +548,9 @@ namespace Eluant
 
 		private void LoadString(string str, string name = "")
 		{
+#if LINUX_COMPILER
+			LoadString(System.Text.Encoding.UTF8.GetBytes(str), name);
+#else
 			if (LuaApi.luaL_loadbuffer(LuaState, str, str.Length, name) != 0)
 			{
 				var error = LuaApi.lua_tostring(LuaState, -1);
@@ -556,11 +559,12 @@ namespace Eluant
 
 				throw new LuaException(error);
 			}
+#endif
 		}
 
 		private void LoadString(byte[] bytes, string name = "")
 		{
-			if (LuaApi.luaL_loadbuffer(LuaState, bytes, bytes.Length, name) != 0)
+			if (LuaApi.luaL_loadbuffer(LuaState, bytes, (UIntPtr)bytes.Length, name) != 0)
 			{
 				var error = LuaApi.lua_tostring(LuaState, -1);
 				LuaApi.lua_pop(LuaState, 1);
